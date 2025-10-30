@@ -50,10 +50,10 @@ pub fn ArgType(flag: []const u8, comptime T: type, value: T, desc: []const u8) t
     comptime {
         const ti = @typeInfo(T);
         switch (ti) {
-            .Bool, .Int, .Float, .Enum => {},
-            .Pointer => {
+            .bool, .int, .float, .@"enum" => {},
+            .pointer => {
                 // Only `[]const u8` is supported
-                if (ti.Pointer.size != .Slice or ti.Pointer.child != u8) {
+                if (ti.pointer.size != .slice or ti.pointer.child != u8) {
                     compErr("Unsupported type \"{}\" for {s}\n", .{ T, flag });
                 }
             },
@@ -70,18 +70,18 @@ pub fn ArgType(flag: []const u8, comptime T: type, value: T, desc: []const u8) t
         pub fn update(self: *Self, raw: []const u8) !void {
             const ti = @typeInfo(T);
             switch (ti) {
-                .Bool => self.value = try strToBool(raw),
-                .Int => self.value = std.fmt.parseInt(T, raw, 10) catch {
+                .bool => self.value = try strToBool(raw),
+                .int => self.value = std.fmt.parseInt(T, raw, 10) catch {
                     std.debug.print("Invalid value \"{s}\" for int\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
-                .Float => self.value = std.fmt.parseFloat(T, raw) catch {
+                .float => self.value = std.fmt.parseFloat(T, raw) catch {
                     std.debug.print("Invalid value \"{s}\" for float\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
-                .Enum => self.value = try strToEnum(T, raw),
-                .Pointer => {
-                    if (ti.Pointer.size == .Slice and ti.Pointer.child == u8) {
+                .@"enum" => self.value = try strToEnum(T, raw),
+                .pointer => {
+                    if (ti.pointer.size == .slice and ti.pointer.child == u8) {
                         self.value = raw;
                     } else {
                         return ArgParseError.UnsupportedType;
@@ -106,7 +106,7 @@ pub fn reifyArgTmpl(comptime Tmpl: type) Tmpl {
         // Iterate over the fields in user-defined `ArgType()`, and initialize
         // fields with its default value.
         inline for (std.meta.fields(arg.type)) |f| {
-            const init_val = @as(*align(1) const f.type, @ptrCast(f.default_value)).*;
+            const init_val = @as(*align(1) const f.type, @ptrCast(f.default_value_ptr)).*;
             @field(arg_value, f.name) = init_val;
         }
 
@@ -120,7 +120,7 @@ pub fn reifyArgTmpl(comptime Tmpl: type) Tmpl {
 /// This is a borrowed implementation from the lastest branch (Zig > 0.13.0):
 /// https://github.com/ziglang/zig/blob/3767b08/lib/std/builtin.zig#L672-L677
 fn getDefaultValue(comptime sf: std.builtin.Type.StructField) ?sf.type {
-    const dp: *const sf.type = @ptrCast(@alignCast(sf.default_value orelse return null));
+    const dp: *const sf.type = @ptrCast(@alignCast(sf.default_value_ptr orelse return null));
     return dp.*;
 }
 
@@ -346,8 +346,8 @@ pub fn showParsedArgs(comptime T: type, args_inst: T) void {
         const arg = @field(args_inst, f.name);
         const val_ti = @typeInfo(@TypeOf(arg.value));
         switch (val_ti) {
-            .Pointer => {
-                if (val_ti.Pointer.size == .Slice) {
+            .pointer => {
+                if (val_ti.pointer.size == .slice) {
                     std.debug.print("{s}\n", .{arg.value});
                 } else {
                     std.debug.print("{any}\n", .{arg.value});

@@ -2,7 +2,7 @@
 A simple CLI argument parser for Zig. Single file, easy to use.
 
 ## Requirements
-- zig 0.13.0
+- zig 0.15.1
 
 ## Installation
 You can just copy `argparse.zig` into your own repo, or add this repo as a Git
@@ -25,7 +25,7 @@ const EnumType = enum { foo, bar };
 const ArgTmpl = struct {
     pos_str: ArgType("pos_str", []const u8, "", "Positional str"),
     opt_str_1: ArgType("-opt_str_1", []const u8, "default_opt_str_1", "Optional str 1"),
-    opt_str_2: ArgType("--opt_str_1", []const u8, "default_opt_str_2", "Optional str 2"),
+    opt_str_2: ArgType("--opt_str_2", []const u8, "default_opt_str_2", "Optional str 2"),
     opt_enum: ArgType("--opt_enum", EnumType, EnumType.bar, "Optional enum"),
     opt_bool: ArgType("--opt_bool", bool, false, "Optional bool"),
     opt_int: ArgType("--opt_int", i32, 10, "Optional int"),

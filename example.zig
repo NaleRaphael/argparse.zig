@@ -4,13 +4,28 @@ const argparse = @import("argparse.zig");
 const ArgType = argparse.ArgType;
 const ArgParseError = argparse.ArgParseError;
 
+/// Similar to how `std.process.argsAlloc()` does internally, but the type of
+/// element in returned slice is `[]const u8` instead of `[:0]u8`.
+/// Caller must free the memory of returned slice.
+fn get_argv(allocator: std.mem.Allocator) ![][]const u8 {
+    var argv_iter = try std.process.argsWithAllocator(allocator);
+    defer argv_iter.deinit();
+    var argv_list = std.array_list.Managed([]const u8).init(allocator);
+    defer argv_list.deinit();
+
+    while (argv_iter.next()) |v| {
+        try argv_list.append(v);
+    }
+    return try argv_list.toOwnedSlice();
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
     defer arena.deinit();
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+    const argv = try get_argv(allocator);
+    defer allocator.free(argv);
 
     // Just an enum for demonstration
     const EnumType = enum { foo, bar };
