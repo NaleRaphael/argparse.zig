@@ -52,7 +52,13 @@ std.debug.print("parsed opt_enum: {}\n", .{args.opt_enum.value});
 
 You can also run `example.zig` to see how it work:
 ```bash
+# Both equal-separated and space-separated forms are supported
+
+# equal-separated form
 $ zig run example.zig -- foo.txt --opt_str_2=bar --opt_enum=foo --opt_int=-42 --opt_float=1.2
+
+# space-separated form
+$ zig run example.zig -- foo.txt --opt_str_2 bar --opt_enum foo --opt_int -42 --opt_float 1.2
 ```
 
 ## Limitations

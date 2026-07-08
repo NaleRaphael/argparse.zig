@@ -265,8 +265,9 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
                 return ArgParseError.TooFewPositionalsToParse;
             }
 
-            for (argv[1..]) |raw_arg| {
-                self.parseSingle(raw_arg) catch |err| switch (err) {
+            var idx_parsed: usize = 1;
+            while (idx_parsed < argv.len) {
+                idx_parsed = self.parseSingle(argv, idx_parsed) catch |err| switch (err) {
                     ArgParseError.EndWithPrintingHelp => {
                         self.printHelp();
                         return err;
@@ -277,60 +278,72 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
             return self.args;
         }
 
-        fn parseSingle(self: *Self, raw_arg: []const u8) ArgParseError!void {
-            if (std.mem.eql(u8, raw_arg, "-h") or std.mem.eql(u8, raw_arg, "--help")) {
+        fn parseSingle(self: *Self, argv: [][]const u8, idx: usize) ArgParseError!usize {
+            const cur_arg = argv[idx];
+            if (std.mem.eql(u8, cur_arg, "-h") or std.mem.eql(u8, cur_arg, "--help")) {
                 return ArgParseError.EndWithPrintingHelp;
             }
 
-            if (isPositional(raw_arg)) {
-                return try self.parsePositional(raw_arg);
+            if (isPositional(cur_arg)) {
+                const next_idx = try self.parsePositional(argv, idx);
+                return next_idx;
             } else {
                 if (self._cnt_parsed_positionals < self._cnt_positionals) {
                     std.debug.print("It seems not all positional arguments are specified.\n", .{});
                     return ArgParseError.TooFewPositionalsToParse;
                 }
-                return try self.parseNonPositional(raw_arg);
+                const next_idx = try self.parseNonPositional(argv, idx);
+                return next_idx;
             }
         }
 
-        fn parsePositional(self: *Self, raw_arg: []const u8) ArgParseError!void {
+        fn parsePositional(self: *Self, argv: [][]const u8, idx: usize) ArgParseError!usize {
+            const cur_arg = argv[idx];
             if (self._cnt_parsed_positionals >= self._cnt_positionals) {
-                std.debug.print("Found extra positional argument to parse: {s}.\n", .{raw_arg});
+                std.debug.print("Found extra positional argument to parse: {s}.\n", .{cur_arg});
                 return ArgParseError.TooManyPositionals;
             }
 
-            const idx = self._cnt_parsed_positionals;
+            const idx_parsed_pos = self._cnt_parsed_positionals;
             const fields = std.meta.fields(Tmpl);
 
             // NOTE: We have to access field like this
             inline for (fields, 0..fields.len) |f, i| {
-                if (idx == i) {
+                if (idx_parsed_pos == i) {
                     // Update arg (`ArgType()`)
-                    try @field(self.args, f.name).update(raw_arg);
+                    try @field(self.args, f.name).update(cur_arg);
                 }
             }
             self._cnt_parsed_positionals += 1;
+            return idx + 1;
         }
 
-        /// Non-positional argument should be always specified as below:
-        /// - "-NAME=VALUE"
-        /// - "--NAME=VALUE"
-        fn parseNonPositional(self: *Self, raw_arg: []const u8) ArgParseError!void {
+        /// Flag of a non-positional argument should be prefixed with "-" or
+        /// "--", and value should be separated by either "=" or " ".
+        fn parseNonPositional(self: *Self, argv: [][]const u8, idx: usize) ArgParseError!usize {
+            const cur_arg = argv[idx];
+
             const fields = std.meta.fields(Tmpl);
             inline for (fields) |f| {
                 var arg = &@field(self.args, f.name);
                 const flag: []const u8 = arg.flag;
 
-                if (raw_arg.len > flag.len + 1 and
-                    std.mem.eql(u8, raw_arg[0..flag.len], flag) and
-                    raw_arg[flag.len] == '=')
-                {
-                    const raw_val = raw_arg[flag.len + 1 ..];
-                    return try arg.update(raw_val);
+                if (cur_arg.len >= flag.len and std.mem.eql(u8, cur_arg[0..flag.len], flag)) {
+                    if (cur_arg.len == flag.len) {
+                        // Flag is exactly matched, so it should be in the form of "--NAME ARG"
+                        const next_arg = argv[idx + 1];
+                        try arg.update(next_arg);
+                        return idx + 2;
+                    } else if (cur_arg[flag.len] == '=') {
+                        // In the form of: "--NAME=ARG"
+                        const raw_val = cur_arg[flag.len + 1 ..];
+                        try arg.update(raw_val);
+                        return idx + 1;
+                    }
                 }
             }
 
-            std.debug.print("Unknown argument to parse: {s}.\n", .{raw_arg});
+            std.debug.print("Unknown argument to parse: {s}.\n", .{cur_arg});
             return ArgParseError.UnknownArgument;
         }
     };
@@ -359,8 +372,19 @@ pub fn showParsedArgs(comptime T: type, args_inst: T) void {
     std.debug.print("=======================\n", .{});
 }
 
-test "test_all_arg_types_and_print_help" {
+test "test_all_arg_types_equal_separated" {
     const ActionType = enum { READ, WRITE };
+
+    const ArgTmpl = struct {
+        pos_str: ArgType("pos_str", []const u8, "", "Positional str"),
+        opt_str_1: ArgType("-opt_str_1", []const u8, "default_opt_str_1", "Optional str 1"),
+        opt_str_2: ArgType("--opt_str_2", []const u8, "default_opt_str_2", "Optional str 2"),
+        opt_enum: ArgType("--opt_enum", ActionType, ActionType.WRITE, "Optional enum"),
+        opt_bool: ArgType("--opt_bool", bool, false, "Optional bool"),
+        opt_int: ArgType("--opt_int", i32, 10, "Optional int"),
+        opt_uint: ArgType("--opt_uint", u64, 17, "Optional uint"),
+        opt_float: ArgType("--opt_float", f32, 0.8, "Optional float"),
+    };
 
     var argv = [_][]const u8{
         "this_bin",
@@ -373,16 +397,50 @@ test "test_all_arg_types_and_print_help" {
         "--opt_enum=READ",
     };
 
+    var arg_parser = ArgumentParser(ArgTmpl).init("prog");
+
+    const args = arg_parser.parse(&argv) catch |err| switch (err) {
+        ArgParseError.EndWithPrintingHelp => return,
+        else => return err,
+    };
+
+    try expect(arg_parser._cnt_positionals == 1);
+    try expect(std.mem.eql(u8, args.pos_str.value, "positional_str"));
+    try expect(std.mem.eql(u8, args.opt_str_1.value, "optional_1"));
+    try expect(std.mem.eql(u8, args.opt_str_2.value, "default_opt_str_2"));
+    try expect(args.opt_enum.value == ActionType.READ);
+    try expect(args.opt_bool.value == true);
+    try expect(args.opt_int.value == -42);
+    try expect(args.opt_uint.value == 42);
+    try expect(std.math.approxEqAbs(f32, args.opt_float.value, -17.0, 1e-6));
+}
+
+test "test_all_arg_types_space_separated" {
+    const ActionType = enum { READ, WRITE };
+
     const ArgTmpl = struct {
         pos_str: ArgType("pos_str", []const u8, "", "Positional str"),
         opt_str_1: ArgType("-opt_str_1", []const u8, "default_opt_str_1", "Optional str 1"),
-        opt_str_2: ArgType("--opt_str_1", []const u8, "default_opt_str_2", "Optional str 2"),
+        opt_str_2: ArgType("--opt_str_2", []const u8, "default_opt_str_2", "Optional str 2"),
         opt_enum: ArgType("--opt_enum", ActionType, ActionType.WRITE, "Optional enum"),
         opt_bool: ArgType("--opt_bool", bool, false, "Optional bool"),
         opt_int: ArgType("--opt_int", i32, 10, "Optional int"),
         opt_uint: ArgType("--opt_uint", u64, 17, "Optional uint"),
         opt_float: ArgType("--opt_float", f32, 0.8, "Optional float"),
     };
+
+    // zig fmt: off
+    var argv = [_][]const u8{
+        "this_bin",
+        "positional_str",
+        "-opt_str_1", "optional_1",
+        "--opt_bool", "true",
+        "--opt_uint", "42",
+        "--opt_int", "-42",
+        "--opt_float", "-17.0",
+        "--opt_enum", "READ",
+    };
+    // zig fmt: on
 
     var arg_parser = ArgumentParser(ArgTmpl).init("prog");
     const args = arg_parser.parse(&argv) catch |err| switch (err) {
