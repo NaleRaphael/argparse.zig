@@ -2,7 +2,7 @@
 A simple CLI argument parser for Zig. Single file, easy to use.
 
 ## Requirements
-- zig 0.15.1
+- zig 0.17.0-dev.1158+1d1193aa7
 
 ## Installation
 You can just copy `argparse.zig` into your own repo, or add this repo as a Git
