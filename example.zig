@@ -4,27 +4,28 @@ const argparse = @import("argparse.zig");
 const ArgType = argparse.ArgType;
 const ArgParseError = argparse.ArgParseError;
 
-/// Similar to how `std.process.argsAlloc()` does internally, but the type of
-/// element in returned slice is `[]const u8` instead of `[:0]u8`.
+/// Get the similar output as `std.process.Args.toSlice()`, but the type of
+/// element in returned slice is not 0 sentinel slice.
 /// Caller must free the memory of returned slice.
-fn get_argv(allocator: std.mem.Allocator) ![][]const u8 {
-    var argv_iter = try std.process.argsWithAllocator(allocator);
-    defer argv_iter.deinit();
-    var argv_list = std.array_list.Managed([]const u8).init(allocator);
-    defer argv_list.deinit();
+fn get_argv(args: std.process.Args, allocator: std.mem.Allocator) ![][]const u8 {
+    var iter = try args.iterateAllocator(allocator);
+    defer iter.deinit();
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    defer argv_list.deinit(allocator);
 
-    while (argv_iter.next()) |v| {
-        try argv_list.append(v);
+    while (iter.next()) |v| {
+        const arg: []const u8 = v;
+        try argv_list.append(allocator, arg);
     }
-    return try argv_list.toOwnedSlice();
+    return try argv_list.toOwnedSlice(allocator);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
     defer arena.deinit();
 
-    const argv = try get_argv(allocator);
+    const argv = try get_argv(init.args, allocator);
     defer allocator.free(argv);
 
     // Just an enum for demonstration
