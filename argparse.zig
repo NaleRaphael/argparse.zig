@@ -4,6 +4,14 @@ const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
 const expectErr = std.testing.expectError;
 
+const root = @import("root");
+
+// Allow user to override the print function
+const print = if (@hasDecl(root, "argparse_override") and @hasDecl(root.argparse_override, "printFn"))
+    root.argparse_override.printFn
+else
+    std.debug.print;
+
 pub const ArgParseError = error{
     TooManyPositionals,
     UnknownArgument,
@@ -18,7 +26,7 @@ pub const ArgParseError = error{
 fn strToBool(raw: []const u8) ArgParseError!bool {
     var buf: [5]u8 = undefined;
     if (raw.len > 5) {
-        std.debug.print("Invalid value \"{s}\" for boolean\n", .{raw});
+        print("Invalid value \"{s}\" for boolean\n", .{raw});
         return ArgParseError.InvalidValue;
     }
 
@@ -28,7 +36,7 @@ fn strToBool(raw: []const u8) ArgParseError!bool {
     } else if (std.mem.eql(u8, out, "false")) {
         return false;
     } else {
-        std.debug.print("Invalid value \"{s}\" for boolean\n", .{raw});
+        print("Invalid value \"{s}\" for boolean\n", .{raw});
         return ArgParseError.InvalidValue;
     }
 }
@@ -37,7 +45,7 @@ fn strToEnum(comptime T: type, raw: []const u8) ArgParseError!T {
     if (std.meta.stringToEnum(T, raw)) |val| {
         return val;
     } else {
-        std.debug.print("Invalid value \"{s}\" for enum type {}\n", .{ raw, T });
+        print("Invalid value \"{s}\" for enum type {}\n", .{ raw, T });
         return ArgParseError.InvalidValue;
     }
 }
@@ -72,11 +80,11 @@ pub fn ArgType(flag: []const u8, comptime T: type, value: T, desc: []const u8) t
             switch (ti) {
                 .bool => self.value = try strToBool(raw),
                 .int => self.value = std.fmt.parseInt(T, raw, 10) catch {
-                    std.debug.print("Invalid value \"{s}\" for int\n", .{raw});
+                    print("Invalid value \"{s}\" for int\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
                 .float => self.value = std.fmt.parseFloat(T, raw) catch {
-                    std.debug.print("Invalid value \"{s}\" for float\n", .{raw});
+                    print("Invalid value \"{s}\" for float\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
                 .@"enum" => self.value = try strToEnum(T, raw),
@@ -238,19 +246,19 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
         pub fn printHelp(self: Self) void {
             const arg_names = @typeInfo(Tmpl).@"struct".field_names;
 
-            std.debug.print("USAGE: {s}", .{self.prog});
+            print("USAGE: {s}", .{self.prog});
             inline for (arg_names) |arg_name| {
                 const flag = @field(self.args, arg_name).flag;
                 if (isPositional(flag)) {
-                    std.debug.print(" {s}", .{arg_name});
+                    print(" {s}", .{arg_name});
                 }
             }
-            std.debug.print(" [options]\n", .{});
+            print(" [options]\n", .{});
 
-            std.debug.print("OPTIONS:\n", .{});
+            print("OPTIONS:\n", .{});
             inline for (arg_names) |arg_name| {
                 const v = @field(self.args, arg_name);
-                std.debug.print("  {s}\t {s}\n", .{ v.flag, v.desc });
+                print("  {s}\t {s}\n", .{ v.flag, v.desc });
             }
         }
 
@@ -259,7 +267,7 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
                 return self.args;
             }
             if ((argv.len - 1) < self._cnt_positionals) {
-                std.debug.print("It seems not all positional arguments are specified.\n", .{});
+                print("It seems not all positional arguments are specified.\n", .{});
                 return ArgParseError.TooFewPositionalsToParse;
             }
 
@@ -287,7 +295,7 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
                 return next_idx;
             } else {
                 if (self._cnt_parsed_positionals < self._cnt_positionals) {
-                    std.debug.print("It seems not all positional arguments are specified.\n", .{});
+                    print("It seems not all positional arguments are specified.\n", .{});
                     return ArgParseError.TooFewPositionalsToParse;
                 }
                 const next_idx = try self.parseNonPositional(argv, idx);
@@ -298,7 +306,7 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
         fn parsePositional(self: *Self, argv: [][]const u8, idx: usize) ArgParseError!usize {
             const cur_arg = argv[idx];
             if (self._cnt_parsed_positionals >= self._cnt_positionals) {
-                std.debug.print("Found extra positional argument to parse: {s}.\n", .{cur_arg});
+                print("Found extra positional argument to parse: {s}.\n", .{cur_arg});
                 return ArgParseError.TooManyPositionals;
             }
 
@@ -341,33 +349,33 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
                 }
             }
 
-            std.debug.print("Unknown argument to parse: {s}.\n", .{cur_arg});
+            print("Unknown argument to parse: {s}.\n", .{cur_arg});
             return ArgParseError.UnknownArgument;
         }
     };
 }
 
 pub fn showParsedArgs(comptime T: type, args_inst: T) void {
-    std.debug.print("===== Parsed args =====\n", .{});
+    print("===== Parsed args =====\n", .{});
 
     const arg_names = @typeInfo(T).@"struct".field_names;
     inline for (arg_names, 0..arg_names.len) |arg_name, i| {
-        std.debug.print("[{d}] {s} : ", .{ i, arg_name });
+        print("[{d}] {s} : ", .{ i, arg_name });
 
         const arg = @field(args_inst, arg_name);
         const val_ti = @typeInfo(@TypeOf(arg.value));
         switch (val_ti) {
             .pointer => {
                 if (val_ti.pointer.size == .slice) {
-                    std.debug.print("{s}\n", .{arg.value});
+                    print("{s}\n", .{arg.value});
                 } else {
-                    std.debug.print("{any}\n", .{arg.value});
+                    print("{any}\n", .{arg.value});
                 }
             },
-            else => std.debug.print("{any}\n", .{arg.value}),
+            else => print("{any}\n", .{arg.value}),
         }
     }
-    std.debug.print("=======================\n", .{});
+    print("=======================\n", .{});
 }
 
 test "test_all_arg_types_equal_separated" {

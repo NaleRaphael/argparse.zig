@@ -4,6 +4,13 @@ const argparse = @import("argparse.zig");
 const ArgType = argparse.ArgType;
 const ArgParseError = argparse.ArgParseError;
 
+// Override the print function with `std.log.err()`
+pub const argparse_override = struct {
+    pub fn printFn(comptime fmt: []const u8, args: anytype) void {
+        std.log.err(fmt, args);
+    }
+};
+
 /// Get the similar output as `std.process.Args.toSlice()`, but the type of
 /// element in returned slice is not 0 sentinel slice.
 /// Caller must free the memory of returned slice.
