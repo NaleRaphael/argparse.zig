@@ -54,7 +54,7 @@ inline fn compErr(comptime fmt: []const u8, args: anytype) void {
     @compileError(std.fmt.comptimePrint(fmt, args));
 }
 
-pub fn ArgType(flag: []const u8, comptime T: type, value: T, desc: []const u8) type {
+pub fn ArgType(flag_: []const u8, comptime T: type, value: T, desc_: []const u8) type {
     comptime {
         const ti = @typeInfo(T);
         switch (ti) {
@@ -62,35 +62,40 @@ pub fn ArgType(flag: []const u8, comptime T: type, value: T, desc: []const u8) t
             .pointer => {
                 // Only `[]const u8` is supported
                 if (ti.pointer.size != .slice or ti.pointer.child != u8) {
-                    compErr("Unsupported type \"{}\" for {s}\n", .{ T, flag });
+                    compErr("Unsupported type \"{}\" for {s}\n", .{ T, flag_ });
                 }
             },
-            else => compErr("Unsupported type \"{}\" for {s}\n", .{ T, flag }),
+            else => compErr("Unsupported type \"{}\" for {s}\n", .{ T, flag_ }),
         }
     }
     return struct {
-        flag: []const u8 = flag,
-        desc: []const u8 = desc,
         value: T = value,
 
+        pub const flag = flag_;
+        pub const desc = desc_;
         const Self = @This();
 
-        pub fn update(self: *Self, raw: []const u8) !void {
+        pub fn update(self: *Self, raw: []const u8) ArgParseError!void {
+            try typeErasedUpdate(self, raw);
+        }
+
+        pub fn typeErasedUpdate(ptr: *anyopaque, raw: []const u8) ArgParseError!void {
+            var ctx: *Self = @ptrCast(@alignCast(ptr));
             const ti = @typeInfo(T);
             switch (ti) {
-                .bool => self.value = try strToBool(raw),
-                .int => self.value = std.fmt.parseInt(T, raw, 10) catch {
+                .bool => ctx.value = try strToBool(raw),
+                .int => ctx.value = std.fmt.parseInt(T, raw, 10) catch {
                     print("Invalid value \"{s}\" for int\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
-                .float => self.value = std.fmt.parseFloat(T, raw) catch {
+                .float => ctx.value = std.fmt.parseFloat(T, raw) catch {
                     print("Invalid value \"{s}\" for float\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
-                .@"enum" => self.value = try strToEnum(T, raw),
+                .@"enum" => ctx.value = try strToEnum(T, raw),
                 .pointer => {
                     if (ti.pointer.size == .slice and ti.pointer.child == u8) {
-                        self.value = raw;
+                        ctx.value = raw;
                     } else {
                         return ArgParseError.UnsupportedType;
                     }
@@ -98,7 +103,55 @@ pub fn ArgType(flag: []const u8, comptime T: type, value: T, desc: []const u8) t
                 else => return ArgParseError.UnsupportedType,
             }
         }
+
+        pub fn info(offset: usize) ArgInfo {
+            return .{
+                .offset = offset,
+                .updateFn = typeErasedUpdate,
+            };
+        }
     };
+}
+
+/// This will be used as a type earsed interface for `ArgType(...)` when we
+/// need to use a list/hash map to store multiple `ArgType(...)`s.
+const ArgInfo = struct {
+    /// Byte offset to parent container (use `@offsetOf()` to get it)
+    offset: usize,
+    updateFn: *const fn (*anyopaque, []const u8) ArgParseError!void,
+
+    pub fn bind(self: *@This(), parent: *anyopaque) BoundArg {
+        return .{ .info = self, .parent = parent };
+    }
+};
+
+/// A helper to call `ArgType(...).update()` when we are operating on `ArgInfo`.
+const BoundArg = struct {
+    info: *const ArgInfo,
+    parent: *anyopaque,
+
+    pub fn update(self: *const BoundArg, raw: []const u8) ArgParseError!void {
+        const ptr = @as([*]u8, @ptrCast(self.parent)) + self.info.offset;
+        try self.info.updateFn(@ptrCast(ptr), raw);
+    }
+};
+
+fn templateToMap(comptime Tmpl: type) std.StaticStringMap(ArgInfo) {
+    comptime {
+        const KV = struct { []const u8, ArgInfo };
+
+        const arg_types = @typeInfo(Tmpl).@"struct".field_types;
+        const arg_names = @typeInfo(Tmpl).@"struct".field_names;
+
+        var kv_list: [arg_names.len]KV = undefined;
+
+        for (arg_types, arg_names, 0..arg_names.len) |arg_type, arg_name, i| {
+            const arg_info = arg_type.info(@offsetOf(Tmpl, arg_name));
+            kv_list[i] = .{ arg_type.flag, arg_info };
+        }
+
+        return std.StaticStringMap(ArgInfo).initComptime(kv_list);
+    }
 }
 
 /// Reify an argument template (user-defined struct).
@@ -111,20 +164,7 @@ pub fn reifyArgTmpl(comptime Tmpl: type) Tmpl {
     const arg_types = @typeInfo(Tmpl).@"struct".field_types;
     const arg_names = @typeInfo(Tmpl).@"struct".field_names;
     inline for (arg_types, arg_names) |arg_type, arg_name| {
-        var arg_value: arg_type = undefined;
-
-        // Iterate over the fields in user-defined `ArgType()`, and initialize
-        // fields with its default value.
-        const f_types = @typeInfo(arg_type).@"struct".field_types;
-        const f_names = @typeInfo(arg_type).@"struct".field_names;
-        const f_attrs = @typeInfo(arg_type).@"struct".field_attrs;
-
-        inline for (f_types, f_names, f_attrs) |f_type, f_name, f_attr| {
-            const init_val = @as(*align(1) const f_type, @ptrCast(f_attr.default_value_ptr)).*;
-            @field(arg_value, f_name) = init_val;
-        }
-
-        @field(args, arg_name) = arg_value;
+        @field(args, arg_name) = arg_type{};
     }
 
     return args;
@@ -175,6 +215,8 @@ fn isValidFlag(comptime flag: []const u8) bool {
 /// ```
 pub fn ArgumentParser(comptime Tmpl: type) type {
     // Do the following checks in comptime:
+    // - Type of each argument defined in `Tmpl` should at least has the same
+    //   declarations and fields as it's defined in `ArgType`
     // - All positional arguments should be defined before non-positional ones
     // - Flag name
     // - Unsupported argument type (e.g., pointer)
@@ -184,19 +226,29 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
         const arg_types = @typeInfo(Tmpl).@"struct".field_types;
         const arg_names = @typeInfo(Tmpl).@"struct".field_names;
 
+        const ti_base = @typeInfo(ArgType("", usize, 0, ""));
+        const base_decls = ti_base.@"struct".decl_names;
+        const base_fields = ti_base.@"struct".field_names;
+
         // NOTE: field order is guaranteed during comptime reflection, so we can
         // check the declaration order according to it. (don't get confused with
         // the in-memory layout of `packed struct`, see also the link below)
         // https://discord.com/channels/605571803288698900/1299673987164536892/1299673987164536892
         for (arg_types, arg_names, 0..arg_types.len) |arg_type, arg_name, i| {
+            // Only check the declarations and fields based on `ArgType` to
+            // allow some sort of customization?
+            for (base_decls) |decl| {
+                if (!@hasDecl(arg_type, decl)) {
+                    compErr("Argument type of '{s}' does not has a declaration named '{s}'", .{ arg_name, decl });
+                }
+            }
+            for (base_fields) |field| {
+                if (!@hasField(arg_type, field)) {
+                    compErr("Argument type of '{s}' does not has a field named '{s}'", .{ arg_name, field });
+                }
+            }
 
-            // XXX: If compiler failed at this line, it means some fields
-            // in given template are not generated by `ArgType()`. Since
-            // we cannot validate those fields with specific type, we have
-            // to rely on this mechanism for now.
-            const sf = std.meta.fieldInfo(arg_type, .flag);
-
-            const flag = sf.attrs.defaultValue([]const u8) orelse "";
+            const flag = arg_type.flag;
             if (!isValidFlag(flag)) {
                 compErr("Invalid flag for argument: {s}\n", .{arg_name});
             }
@@ -209,8 +261,7 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
 
             // Check duplicated flags
             for (arg_types[0..i], arg_names[0..i]) |_ft, _fn| {
-                const prev = std.meta.fieldInfo(_ft, .flag);
-                const prev_flag = prev.attrs.defaultValue([]const u8) orelse "";
+                const prev_flag = _ft.flag;
                 if (std.mem.eql(u8, flag, prev_flag)) {
                     compErr("Found duplicated flag in \"{s}\" and \"{s}\"\n", .{ arg_name, _fn });
                 }
@@ -221,6 +272,8 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
     return struct {
         prog: []const u8,
         args: Tmpl,
+        arg_map: std.StaticStringMap(ArgInfo),
+        positional_flags: []const []const u8,
         _cnt_positionals: u32,
         _cnt_parsed_positionals: u32,
 
@@ -229,36 +282,46 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
         pub fn init(prog: []const u8) Self {
             const args = reifyArgTmpl(Tmpl);
 
-            var cnt: u32 = 0;
-            inline for (@typeInfo(Tmpl).@"struct".field_names) |arg_name| {
-                const flag = @field(args, arg_name).flag;
-                cnt += @intFromBool(isPositional(flag));
-            }
+            const cnt = comptime blk: {
+                var ret: u32 = 0;
+                for (@typeInfo(Tmpl).@"struct".field_types) |arg_type| {
+                    ret += @intFromBool(isPositional(arg_type.flag));
+                }
+                break :blk ret;
+            };
+
+            const positional_flags = comptime blk: {
+                var ret: [cnt][]const u8 = undefined;
+                for (@typeInfo(Tmpl).@"struct".field_types[0..cnt], 0..cnt) |arg_type, i| {
+                    ret[i] = arg_type.flag;
+                }
+                break :blk ret;
+            };
 
             return .{
                 .prog = prog,
                 .args = args,
+                .arg_map = comptime templateToMap(Tmpl),
+                .positional_flags = &positional_flags,
                 ._cnt_positionals = cnt,
                 ._cnt_parsed_positionals = 0,
             };
         }
 
         pub fn printHelp(self: Self) void {
-            const arg_names = @typeInfo(Tmpl).@"struct".field_names;
+            const arg_types = @typeInfo(Tmpl).@"struct".field_types;
 
             print("USAGE: {s}", .{self.prog});
-            inline for (arg_names) |arg_name| {
-                const flag = @field(self.args, arg_name).flag;
-                if (isPositional(flag)) {
-                    print(" {s}", .{arg_name});
+            inline for (arg_types) |arg_type| {
+                if (isPositional(arg_type.flag)) {
+                    print(" {s}", .{arg_type.flag});
                 }
             }
             print(" [options]\n", .{});
 
             print("OPTIONS:\n", .{});
-            inline for (arg_names) |arg_name| {
-                const v = @field(self.args, arg_name);
-                print("  {s}\t {s}\n", .{ v.flag, v.desc });
+            inline for (arg_types) |arg_type| {
+                print("  {s}\t {s}\n", .{ arg_type.flag, arg_type.desc });
             }
         }
 
@@ -311,15 +374,11 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
             }
 
             const idx_parsed_pos = self._cnt_parsed_positionals;
-            const arg_names = @typeInfo(Tmpl).@"struct".field_names;
+            const flag = self.positional_flags[idx_parsed_pos];
 
-            // NOTE: We have to access field like this
-            inline for (arg_names, 0..arg_names.len) |arg_name, i| {
-                if (idx_parsed_pos == i) {
-                    // Update arg (`ArgType()`)
-                    try @field(self.args, arg_name).update(cur_arg);
-                }
-            }
+            var arg_info = self.arg_map.get(flag).?;
+            try arg_info.bind(&self.args).update(cur_arg);
+
             self._cnt_parsed_positionals += 1;
             return idx + 1;
         }
@@ -329,28 +388,17 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
         fn parseNonPositional(self: *Self, argv: [][]const u8, idx: usize) ArgParseError!usize {
             const cur_arg = argv[idx];
 
-            const arg_names = @typeInfo(Tmpl).@"struct".field_names;
-            inline for (arg_names) |arg_name| {
-                var arg = &@field(self.args, arg_name);
-                const flag: []const u8 = arg.flag;
+            const pos_equal = std.mem.findPosLinear(u8, cur_arg, 0, "=");
+            const flag = if (pos_equal) |pos| cur_arg[0..pos] else cur_arg;
+            const raw_val = if (pos_equal) |pos| cur_arg[pos + 1 ..] else argv[idx + 1];
 
-                if (cur_arg.len >= flag.len and std.mem.eql(u8, cur_arg[0..flag.len], flag)) {
-                    if (cur_arg.len == flag.len) {
-                        // Flag is exactly matched, so it should be in the form of "--NAME ARG"
-                        const next_arg = argv[idx + 1];
-                        try arg.update(next_arg);
-                        return idx + 2;
-                    } else if (cur_arg[flag.len] == '=') {
-                        // In the form of: "--NAME=ARG"
-                        const raw_val = cur_arg[flag.len + 1 ..];
-                        try arg.update(raw_val);
-                        return idx + 1;
-                    }
-                }
-            }
+            var arg_info = self.arg_map.get(flag) orelse {
+                print("Unknown argument to parse: {s}.\n", .{cur_arg});
+                return ArgParseError.UnknownArgument;
+            };
+            try arg_info.bind(&self.args).update(raw_val);
 
-            print("Unknown argument to parse: {s}.\n", .{cur_arg});
-            return ArgParseError.UnknownArgument;
+            return if (pos_equal != null) idx + 1 else idx + 2;
         }
     };
 }
