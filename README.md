@@ -55,16 +55,43 @@ You can also run `example.zig` to see how it work:
 # Both equal-separated and space-separated forms are supported
 
 # equal-separated form
-$ zig run example.zig -- foo.txt --opt_str_2=bar --opt_enum=foo --opt_int=-42 --opt_float=1.2
+$ zig run example.zig -- foo.txt --opt_str_2=bar --opt_enum=foo --opt_int=-42 --opt_float=1.2 --opt_n_str_2=buzz --bool_flag_2
 
 # space-separated form
-$ zig run example.zig -- foo.txt --opt_str_2 bar --opt_enum foo --opt_int -42 --opt_float 1.2
+$ zig run example.zig -- foo.txt --opt_str_2 bar --opt_enum foo --opt_int -42 --opt_float 1.2 --opt_n_str_2 buzz --bool_flag_2
 ```
+
+### Optional types
+- Declare arguments as follows for `optional` types:
+  ```zig
+  // To avoid confusion between "optional argument" and "optional type", here
+  // we add a prefix "n_" to indicate types of these arguments are "optional
+  // type" (nullable), and the prefix "opt_" indicates they are "optional argument".
+  ArgType("--opt_n_u32_1", ?u32, null, "Nullable u32 1"),
+  ArgType("--opt_n_u32_2", ?u32, 42, "Nullable u32 2"),
+  ArgType("--opt_n_str_1", ?[]const u8, null, "Nullable str 1"),
+  ArgType("--opt_n_str_2", ?[]const u8, "foo", "Nullable str 2"),
+  ArgType("--opt_n_enum_1", ?ActionType, null, "Nullable enum 1"),
+  ArgType("--opt_n_enum_2", ?ActionType, ActionType.READ, "Nullable enum 2"),
+  ```
+- To create a boolean flag, specify the type as `?bool` and use either `true`
+  or `false` as the default value, then user don't need to supply a value after
+  it in command line:
+  ```zig
+  // Boolean flags (type is `?bool` and default value **cannot** be null)
+  ArgType("--pos_flag", ?bool, false, "A boolean flag (value will be `true` when it's supplied)");
+  ArgType("--neg_flag", ?bool, true, "A boolean flag (value will be `false` when it's supplied)");
+  ```
+  If the default value is null, it will be taken as a normal `optional` type,
+  and user need to pass a value after it in command line:
+  ```zig
+  // Normal optional boolean (default value is null)
+  ArgType("--opt_bool", ?bool, null, "A optional boolean");
+  ```
 
 ## Limitations
 - Not supported types:
     - Array/ArrayList/Vector
-    - Optional
     - Non-builtin types
 - Subcommand is also not supported.
 - Enum is supported, but it's case sensitive to the value. Like the example

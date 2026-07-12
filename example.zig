@@ -50,6 +50,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         opt_int: ArgType("--opt_int", i32, 10, "Optional int"),
         opt_uint: ArgType("--opt_uint", u64, 17, "Optional uint"),
         opt_float: ArgType("--opt_float", f32, 0.8, "Optional float"),
+        opt_n_str_1: ArgType("--opt_n_str_1", ?[]const u8, null, "Nullable str 1"),
+        opt_n_str_2: ArgType("--opt_n_str_2", ?[]const u8, null, "Nullable str 2"),
+        opt_n_bool: ArgType("--opt_n_bool", ?bool, null, "Nullable boolean"),
+        bool_flag_1: ArgType("--bool_flag_1", ?bool, true, "Boolean flag 1"),
+        bool_flag_2: ArgType("--bool_flag_2", ?bool, false, "Boolean flag 2"),
     };
 
     var arg_parser = argparse.ArgumentParser(ArgTmpl).init("prog");

@@ -17,6 +17,7 @@ pub const ArgParseError = error{
     UnknownArgument,
     // PositionalAfterOptional, // check in comptime
     InvalidValue,
+    NoSuppliedValue,
     // InvalidFlag, // check in comptime
     TooFewPositionalsToParse,
     EndWithPrintingHelp,
@@ -50,6 +51,11 @@ fn strToEnum(comptime T: type, raw: []const u8) ArgParseError!T {
     }
 }
 
+fn isBooleanFlag(comptime T: type, default_value: T) bool {
+    const ti = @typeInfo(T);
+    return (ti == .optional) and (@typeInfo(ti.optional.child) == .bool) and (default_value != null);
+}
+
 inline fn compErr(comptime fmt: []const u8, args: anytype) void {
     @compileError(std.fmt.comptimePrint(fmt, args));
 }
@@ -59,10 +65,15 @@ pub fn ArgType(flag_: []const u8, comptime T: type, value: T, desc_: []const u8)
         const ti = @typeInfo(T);
         switch (ti) {
             .bool, .int, .float, .@"enum" => {},
-            .pointer => {
+            .pointer => |ptr_info| {
                 // Only `[]const u8` is supported
-                if (ti.pointer.size != .slice or ti.pointer.child != u8) {
+                if (ptr_info.size != .slice or ptr_info.child != u8) {
                     compErr("Unsupported type \"{}\" for {s}\n", .{ T, flag_ });
+                }
+            },
+            .optional => |opt_info| {
+                if (@typeInfo(opt_info.child) == .optional) {
+                    compErr("Multi-level optional \"{}\" is not supported: \"{s}\"", .{ T, flag_ });
                 }
             },
             else => compErr("Unsupported type \"{}\" for {s}\n", .{ T, flag_ }),
@@ -80,35 +91,55 @@ pub fn ArgType(flag_: []const u8, comptime T: type, value: T, desc_: []const u8)
         }
 
         pub fn typeErasedUpdate(ptr: *anyopaque, raw: []const u8) ArgParseError!void {
-            var ctx: *Self = @ptrCast(@alignCast(ptr));
-            const ti = @typeInfo(T);
-            switch (ti) {
-                .bool => ctx.value = try strToBool(raw),
-                .int => ctx.value = std.fmt.parseInt(T, raw, 10) catch {
+            const ctx: *Self = @ptrCast(@alignCast(ptr));
+            try innerUpdate(T, ctx, raw, false);
+        }
+
+        pub fn info(name: []const u8, offset: usize) ArgInfo {
+            return .{
+                .name = name,
+                .offset = offset,
+                .is_boolean_flag = isBooleanFlag(T, value),
+                .updateFn = typeErasedUpdate,
+            };
+        }
+
+        fn innerUpdate(comptime T_: type, ctx: *Self, raw: []const u8, comptime is_optional: bool) ArgParseError!void {
+            switch (@typeInfo(T_)) {
+                .bool => {
+                    // NOTE: we need `is_optional` to be a compile-time bool here to make it
+                    // generate a different code path. Otherwise, the following comparison
+                    // `ctx.value != null` would be repoted with an attempt of
+                    // "comparison of 'bool' with null" when a `T = bool`.
+                    if (is_optional and ctx.value != null and std.mem.eql(u8, raw, "")) {
+                        ctx.value = !ctx.value.?;
+                    } else {
+                        ctx.value = try strToBool(raw);
+                    }
+                },
+                .int => ctx.value = std.fmt.parseInt(T_, raw, 10) catch {
                     print("Invalid value \"{s}\" for int\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
-                .float => ctx.value = std.fmt.parseFloat(T, raw) catch {
+                .float => ctx.value = std.fmt.parseFloat(T_, raw) catch {
                     print("Invalid value \"{s}\" for float\n", .{raw});
                     return ArgParseError.InvalidValue;
                 },
-                .@"enum" => ctx.value = try strToEnum(T, raw),
-                .pointer => {
-                    if (ti.pointer.size == .slice and ti.pointer.child == u8) {
+                .@"enum" => ctx.value = try strToEnum(T_, raw),
+                .pointer => |ptr_info| {
+                    if (ptr_info.size == .slice and ptr_info.child == u8) {
                         ctx.value = raw;
                     } else {
                         return ArgParseError.UnsupportedType;
                     }
                 },
+                .optional => |opt_info| {
+                    // Multi-level optional is not allowed and it should be checked in compile-time
+                    std.debug.assert(@typeInfo(opt_info.child) != .optional);
+                    try innerUpdate(opt_info.child, ctx, raw, true);
+                },
                 else => return ArgParseError.UnsupportedType,
             }
-        }
-
-        pub fn info(offset: usize) ArgInfo {
-            return .{
-                .offset = offset,
-                .updateFn = typeErasedUpdate,
-            };
         }
     };
 }
@@ -116,8 +147,12 @@ pub fn ArgType(flag_: []const u8, comptime T: type, value: T, desc_: []const u8)
 /// This will be used as a type earsed interface for `ArgType(...)` when we
 /// need to use a list/hash map to store multiple `ArgType(...)`s.
 const ArgInfo = struct {
+    /// Field name of this argument in parent container
+    name: []const u8,
     /// Byte offset to parent container (use `@offsetOf()` to get it)
     offset: usize,
+    /// See how it's defined in `isBooleanFlag()`
+    is_boolean_flag: bool,
     updateFn: *const fn (*anyopaque, []const u8) ArgParseError!void,
 
     pub fn bind(self: *@This(), parent: *anyopaque) BoundArg {
@@ -146,7 +181,7 @@ fn templateToMap(comptime Tmpl: type) std.StaticStringMap(ArgInfo) {
         var kv_list: [arg_names.len]KV = undefined;
 
         for (arg_types, arg_names, 0..arg_names.len) |arg_type, arg_name, i| {
-            const arg_info = arg_type.info(@offsetOf(Tmpl, arg_name));
+            const arg_info = arg_type.info(arg_name, @offsetOf(Tmpl, arg_name));
             kv_list[i] = .{ arg_type.flag, arg_info };
         }
 
@@ -390,15 +425,35 @@ pub fn ArgumentParser(comptime Tmpl: type) type {
 
             const pos_equal = std.mem.findPosLinear(u8, cur_arg, 0, "=");
             const flag = if (pos_equal) |pos| cur_arg[0..pos] else cur_arg;
-            const raw_val = if (pos_equal) |pos| cur_arg[pos + 1 ..] else argv[idx + 1];
+            var idx_offset: usize = 1;
 
             var arg_info = self.arg_map.get(flag) orelse {
                 print("Unknown argument to parse: {s}.\n", .{cur_arg});
                 return ArgParseError.UnknownArgument;
             };
+
+            // Check whether it's a boolean flag:
+            // - If true, no value should be supplied.
+            // - If false, try to use the next argv as value.
+            const raw_val = if (arg_info.is_boolean_flag) blk: {
+                // Pass an empty string to let it use the inverted default value
+                break :blk "";
+            } else blk: {
+                idx_offset += @intFromBool(pos_equal == null);
+                if (pos_equal) |pos| {
+                    break :blk cur_arg[pos + 1 ..];
+                } else {
+                    if (idx + 1 >= argv.len) {
+                        print("No value is supplied for argument '{s}'\n", .{flag});
+                        return ArgParseError.NoSuppliedValue;
+                    }
+                    break :blk argv[idx + 1];
+                }
+            };
+
             try arg_info.bind(&self.args).update(raw_val);
 
-            return if (pos_equal != null) idx + 1 else idx + 2;
+            return idx + idx_offset;
         }
     };
 }
@@ -511,6 +566,106 @@ test "test_all_arg_types_space_separated" {
     try expect(args.opt_int.value == -42);
     try expect(args.opt_uint.value == 42);
     try expect(std.math.approxEqAbs(f32, args.opt_float.value, -17.0, 1e-6));
+}
+
+test "test_boolean_flag" {
+    const ArgTmpl = struct {
+        bool_flag_1: ArgType("--bool_flag_1", ?bool, false, "bool_flag_1"),
+        bool_flag_2: ArgType("--bool_flag_2", ?bool, false, "bool_flag_2"),
+        bool_flag_3: ArgType("--bool_flag_3", ?bool, true, "bool_flag_3"),
+        bool_flag_4: ArgType("--bool_flag_4", ?bool, true, "bool_flag_4"),
+    };
+
+    // zig fmt: off
+    var argv = [_][]const u8{
+        "this_bin",
+        "--bool_flag_1",
+        "--bool_flag_3",
+    };
+    // zig fmt: on
+
+    var arg_parser = ArgumentParser(ArgTmpl).init("prog");
+    const args = arg_parser.parse(&argv) catch |err| switch (err) {
+        ArgParseError.EndWithPrintingHelp => return,
+        else => return err,
+    };
+
+    try expect(arg_parser._cnt_positionals == 0);
+
+    try expect(args.bool_flag_1.value != null);
+    try expect(args.bool_flag_1.value.? == true);
+    try expect(args.bool_flag_2.value != null);
+    try expect(args.bool_flag_2.value.? == false);
+    try expect(args.bool_flag_3.value != null);
+    try expect(args.bool_flag_3.value == false);
+    try expect(args.bool_flag_4.value != null);
+    try expect(args.bool_flag_4.value.? == true);
+}
+
+test "test_optional_args" {
+    const ActionType = enum { READ, WRITE };
+    const ArgTmpl = struct {
+        opt_n_bool: ArgType("--opt_n_bool", ?bool, null, "Nullable bool"),
+        opt_n_u32_1: ArgType("--opt_n_u32_1", ?u32, null, "Nullable u32 1"),
+        opt_n_u32_2: ArgType("--opt_n_u32_2", ?u32, 42, "Nullable u32 2"),
+        opt_n_u32_3: ArgType("--opt_n_u32_3", ?u32, 24, "Nullable u32 3"),
+        opt_n_str_1: ArgType("--opt_n_str_1", ?[]const u8, null, "Nullable str 1"),
+        opt_n_str_2: ArgType("--opt_n_str_2", ?[]const u8, "foo", "Nullable str 2"),
+        opt_n_str_3: ArgType("--opt_n_str_3", ?[]const u8, "buzz", "Nullable str 3"),
+        opt_n_enum_1: ArgType("--opt_n_enum_1", ?ActionType, null, "Nullable enum 1"),
+        opt_n_enum_2: ArgType("--opt_n_enum_2", ?ActionType, null, "Nullable enum 2"),
+        opt_n_enum_3: ArgType("--opt_n_enum_3", ?ActionType, ActionType.READ, "Nullable enum 3"),
+        opt_n_enum_4: ArgType("--opt_n_enum_4", ?ActionType, ActionType.READ, "Nullable enum 4"),
+    };
+
+    // zig fmt: off
+    var argv = [_][]const u8{
+        "this_bin",
+        "--opt_n_u32_2", "13",
+        "--opt_n_bool", "false",
+        "--opt_n_str_2", "bar",
+        "--opt_n_enum_1", "READ",
+        "--opt_n_enum_3", "WRITE",
+    };
+    // zig fmt: on
+
+    var arg_parser = ArgumentParser(ArgTmpl).init("prog");
+    const args = arg_parser.parse(&argv) catch |err| switch (err) {
+        ArgParseError.EndWithPrintingHelp => return,
+        else => return err,
+    };
+
+    try expect(arg_parser._cnt_positionals == 0);
+
+    try expect(args.opt_n_bool.value != null);
+    try expect(args.opt_n_bool.value.? == false);
+
+    try expect(args.opt_n_u32_1.value == null);
+
+    try expect(args.opt_n_u32_2.value != null);
+    try expect(args.opt_n_u32_2.value.? == 13);
+
+    try expect(args.opt_n_u32_3.value != null);
+    try expect(args.opt_n_u32_3.value.? == 24);
+
+    try expect(args.opt_n_str_1.value == null);
+
+    try expect(args.opt_n_str_2.value != null);
+    try expect(std.mem.eql(u8, args.opt_n_str_2.value.?, "bar"));
+
+    try expect(args.opt_n_str_3.value != null);
+    try expect(std.mem.eql(u8, args.opt_n_str_3.value.?, "buzz"));
+
+    try expect(args.opt_n_enum_1.value != null);
+    try expect(args.opt_n_enum_1.value.? == ActionType.READ);
+
+    try expect(args.opt_n_enum_2.value == null);
+
+    try expect(args.opt_n_enum_3.value != null);
+    try expect(args.opt_n_enum_3.value.? == ActionType.WRITE);
+
+    try expect(args.opt_n_enum_4.value != null);
+    try expect(args.opt_n_enum_4.value.? == ActionType.READ);
 }
 
 test "expect_error_TooManyPositionals" {
@@ -676,6 +831,30 @@ test "expect_error_TooFewPositionalsToParse_2" {
     // positional arguments should be supplied before optional arguments, this
     // case should fail.
     try expectErr(ArgParseError.TooFewPositionalsToParse, res);
+}
+
+test "expect_error_NoValueIsSupplied_1" {
+    var argv = [_][]const u8{ "this_bin", "--opt_int" };
+    const ArgTmpl = struct {
+        opt_int: ArgType("--opt_int", i32, 0, "Optional int"),
+    };
+
+    var arg_parser = ArgumentParser(ArgTmpl).init("prog");
+    const res = arg_parser.parse(&argv);
+
+    try expectErr(ArgParseError.NoSuppliedValue, res);
+}
+
+test "expect_error_NoValueIsSupplied_2" {
+    var argv = [_][]const u8{ "this_bin", "--opt_bool" };
+    const ArgTmpl = struct {
+        opt_bool: ArgType("--opt_bool", ?bool, null, "Optional bool"),
+    };
+
+    var arg_parser = ArgumentParser(ArgTmpl).init("prog");
+    const res = arg_parser.parse(&argv);
+
+    try expectErr(ArgParseError.NoSuppliedValue, res);
 }
 
 test "expect_error_EndWithPrintingHelp_1" {
